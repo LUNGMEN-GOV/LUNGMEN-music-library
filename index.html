@@ -38,11 +38,11 @@ cursor: pointer;
 </style>
 </head>
 <body>
-<div id="scoreBoard">得分: 0 最高分: 0</div>
+<div id="scoreBoard">当前得分: 0   最高分: 0</div>
 <div id="friendlyToggle">
 <label>
 <input type="checkbox" id="ffSwitch">
-友伤开关
+友伤模式
 </label>
 </div>
 <canvas id="gameCanvas"></canvas>
@@ -56,6 +56,9 @@ window.addEventListener('resize', () => {
 canvas.width = window.innerWidth;
 canvas.height = window.innerHeight;
 });
+let gameTime = 0;
+let lastUpdate = Date.now();
+let lastRefreshTime = 0;
 
 // 地图尺寸：3000×3000
 const MAP_WIDTH = 3000, MAP_HEIGHT = 3000;
@@ -83,24 +86,60 @@ const COMP_SPEED = 2.7 * 0.9; // 电脑蛇速度
 const BOMB_RADIUS = SUPER_FOOD_RADIUS * 1.3;
 const BOMB_SPEED = PLAYER_SPEED * 1.8;
 
+/***************** 暂停功能 *****************/
+let isPaused = false;
+let pauseStartTime = 0; //记录暂停开始的时刻
+
+document.addEventListener('keydown',(e) => {
+    if (e.code === 'Space'){
+        togglePause();
+    }
+});
+
+let lastTapTime = 0;
+canvas.addEventListener('touchend',(e) => {
+    const currentTime = Date.now();
+    if (currentTime - lastTapTime < 300) { // 300毫秒内算双击
+        togglePause();
+    }
+    lastTapTime = currentTime;
+});
+
+// 定义暂停函数
+function togglePause() {
+    isPaused = !isPaused;
+    if (isPaused) {
+        pauseStartTime = Date.now();
+    } else {
+        // 解除暂停时，计算暂停持续时间
+        const pauseDuration = Date.now() - pauseStartTime;
+        // 补偿时间实体的spawnTime
+        //foods.forEach(f => {
+            //if (f.type === 'super') {
+                //f.spawnTime += pauseDuration;
+            //}
+        //});
+    }
+}
+
 /***************** 音效设置 *****************/
-const soundElimination = new Audio('elimination.mp3'); // 电脑蛇被淘汰音效
+const soundElimination = new Audio('sounds/elimination.mp3'); // 电脑蛇被淘汰音效
 soundElimination.preload = "auto";
 soundElimination.load();
 soundElimination.play();
-const soundPlayerEliminated = new Audio('player_eliminated.mp3'); // 玩家蛇被淘汰音效
+const soundPlayerEliminated = new Audio('sounds/player_eliminated.mp3'); // 玩家蛇被淘汰音效
 soundPlayerEliminated.preload = "auto";
 soundPlayerEliminated.load();
 soundPlayerEliminated.play();
-const soundSuperFood = new Audio('superfood.mp3'); // 吃超级食物音效
+const soundSuperFood = new Audio('sounds/superfood.mp3'); // 吃超级食物音效
 soundSuperFood.preload = "auto";
 soundSuperFood.load();
 soundSuperFood.play();
-const soundBoundaryHit = new Audio('boundary.mp3'); // 触碰边界音效
+const soundBoundaryHit = new Audio('sounds/boundary.mp3'); // 触碰边界音效
 soundBoundaryHit.preload = "auto";
 soundBoundaryHit.load();
 soundBoundaryHit.play();
-const soundBombHit = new Audio('explode.mp3'); // 炸弹球碰撞音效
+const soundBombHit = new Audio('sounds/explode.mp3'); // 炸弹球碰撞音效
 soundBombHit.preload = "auto";
 soundBombHit.load();
 soundBombHit.play();
@@ -108,13 +147,23 @@ soundBombHit.play();
 // 播放音效函数
 function playSound(audioObj) {
 if(audioObj && typeof audioObj.play === 'function'){
-audioObj.currentTime = 0;
-audioObj.play();
+let sound = audioObj.cloneNode();
+sound.currentTime = 0;
+sound.play().catch(err => {
+    console.error("Errors occurred when playing the soundtrack.",err);
+});
 }
 }
 
-/***************** 友伤开关持久化 *****************/
-let friendlyFireEnabled = localStorage.getItem('friendlyFireEnabled') === 'false';
+/***************** 友伤模式持久化 *****************/
+let friendlyFireEnabled;
+const storedFF = localStorage.getItem('friendlyFireEnabled');
+if (storedFF === null) {
+    friendlyFireEnabled = false;
+    localStorage.setItem('friendlyFireEnabled',"false");
+} else {
+    friendlyFireEnabled = (storedFF === "true");
+}
 const ffSwitch = document.getElementById('ffSwitch');
 ffSwitch.checked = friendlyFireEnabled;
 ffSwitch.addEventListener('change', (e) => {
@@ -133,6 +182,28 @@ hue = randomInt(0, 360);
 return 'hsl(' + hue + ', 70%, 50%)';
 }
 function randomColor() { return 'hsl(' + randomInt(0, 360) + ', 70%, 50%)'; }
+function randomPlayerColor() {
+    // 设定 50% 概率返回黄色
+    if (Math.random() < 0.5) {
+        return 'hsl(60,100%,50%)';
+    } else {
+        return randomColor();
+    }
+}
+function randomComputerColor(excludeColor) {
+    let color;
+    do {
+        color = randomColor();
+    } while (color === excludeColor);
+    return color;
+}
+// 安全设置
+document.addEventListener('contextmenu',event => event.preventDefault());
+document.addEventListener('keydown', event => {
+    if (event.key === 'F12' || (event.ctrlKey && event.shiftKey && event.key === 'I')) {
+        event.preventDefault();
+    }
+});
 
 /***************** 全局变量 *****************/
 let foods = [];
@@ -149,28 +220,56 @@ this.y = y;
 this.type = type; // 'normal'、'super'、'corpse'
 if(this.type === 'super'){
 this.color = randomColorNoRed();
-this.spawnTime = Date.now();
+this.spawnTime = gameTime;
+this.dying = false;
+this.disappearOpacity = 1;
 } else {
 this.color = randomColor();
 }
 this.opacity = 1;
 }
+update() {
+if(this.type === 'super'){
+let elapsed = gameTime - this.spawnTime;
+if(!this.dying && elapsed > SUPER_FOOD_DURATION){
+    this.dying = true;
+}
+if(this.dying){
+    this.disappearOpacity -= 0.04;
+    if(this.disappearOpacity <= 0){
+        this.opacity = 0;
+    }
+}
+}
+}
 draw() {
 ctx.save();
-ctx.globalAlpha = this.opacity;
+ctx.globalAlpha = (this.type === 'super' && this.dying) ? this.disappearOpacity : this.opacity;
 ctx.fillStyle = this.color;
 ctx.beginPath();
-let radius;
-if (this.type === 'normal') {
-radius = FOOD_NORMAL_RADIUS;
-} else if (this.type === 'super') {
-radius = SUPER_FOOD_RADIUS;
-} else if (this.type === 'corpse') {
-radius = FOOD_NORMAL_RADIUS * 1.3;
-}
+let radius = (this.type === 'normal') ? FOOD_NORMAL_RADIUS :
+(this.type === 'super') ? SUPER_FOOD_RADIUS :
+(this.type === 'corpse') ? FOOD_NORMAL_RADIUS * 1.3 : 0;
 ctx.arc(this.x, this.y, radius, 0, Math.PI * 2);
 ctx.fill();
+
+let currentTime = gameTime;
+if (this.type === 'super' && !this.dying) {
+let elapsed = gameTime - this.spawnTime;
+let remaining = SUPER_FOOD_DURATION - elapsed;
+if (remaining <= 10000 && remaining > 0) {
+let seconds = Math.ceil(remaining / 1000);
+ctx.fillStyle = "red";
+ctx.font = "bold 20px sans-serif";
+ctx.textAlign = "center";
+ctx.textBaseline = "middle";
+ctx.fillText(seconds, this.x, this.y);
+}
+}
+
 ctx.restore();
+}
+}
 if(this.type === 'super'){
 let elapsed = Date.now() - this.spawnTime;
 let remaining = SUPER_FOOD_DURATION - elapsed;
@@ -185,16 +284,7 @@ ctx.fillText(seconds, this.x, this.y);
 ctx.restore();
 }
 }
-}
-update() {
-if(this.type === 'super'){
-let elapsed = Date.now() - this.spawnTime;
-if(elapsed > SUPER_FOOD_DURATION){
-this.opacity = 0;
-}
-}
-}
-}
+
 
 /***************** 蛇类 *****************/
 class Snake {
@@ -305,15 +395,23 @@ this.alive = false;
 this.dying = true;
 if(this.isPlayer){
     if(cause == "bomb"){
-        playSound(soundBombHit);
-        playSound(soundPlayerEliminated);
+        setTimeout(() => {
+            playSound(soundBombHit);
+            playSound(soundPlayerEliminated);
+        },0);
     } else if(cause == "boundary"){
-        playSound(soundBoundaryHit);
+        setTimeout(() => {
+            playSound(soundBoundaryHit);
+        },0);
     } else {
-        playSound(soundPlayerEliminated);
+        setTimeout(() => {
+            playSound(soundPlayerEliminated);
+        },0);
     }
 } else {
-playSound(soundElimination);
+setTimeout(() => {
+    playSound(soundElimination);
+},0);
 }
 }
 if(this.isPlayer) gameOver();
@@ -370,7 +468,8 @@ playSound(soundBombHit);
 }
 
 /***************** 初始生成 *****************/
-let playerSnake = new Snake(MAP_WIDTH/2, MAP_HEIGHT/2, '#0f0', true);
+let playerSnakeColor = randomPlayerColor();
+let playerSnake = new Snake(MAP_WIDTH/2, MAP_HEIGHT/2, playerSnakeColor, true);
 snakes.push(playerSnake);
 
 function spawnComputerSnake() {
@@ -380,17 +479,18 @@ spawnX = random(0, MAP_WIDTH);
 spawnY = random(0, MAP_HEIGHT);
 } while(Math.hypot(spawnX - playerSnake.head.x, spawnY - playerSnake.head.y) < 300);
 let initLength = Math.max(3, Math.floor(playerSnake.segments.length * 0.65));
-let compSnake = new Snake(spawnX, spawnY, randomColorNoRed(), false, initLength);
+let compColor = randomComputerColor(playerSnake.color);
+let compSnake = new Snake(spawnX, spawnY, compColor, false, initLength);
 snakes.push(compSnake);
 }
 for(let i = 0; i < 5; i++){
 spawnComputerSnake();
 }
 
-for(let i = 0; i < 350; i++){
+for(let i = 0; i < 400; i++){
 let fx = random(0, MAP_WIDTH);
 let fy = random(0, MAP_HEIGHT);
-let type = (Math.random() < 0.05) ? 'super' : 'normal';
+let type = (Math.random() < 0.07) ? 'super' : 'normal';
 foods.push(new Food(fx, fy, type));
 }
 
@@ -406,6 +506,7 @@ bombs.push(spawnBomb());
 
 /***************** 食物刷新与炸弹球补齐 *****************/
 function refreshFoodByDensity() {
+if(isPaused) return; // 暂停时不刷新
 let cols = Math.ceil(MAP_WIDTH/GRID_SIZE);
 let rows = Math.ceil(MAP_HEIGHT/GRID_SIZE);
 let grid = Array(rows).fill(0).map(() => Array(cols).fill(0));
@@ -418,12 +519,19 @@ const threshold = 3;
 for(let r = 0; r < rows; r++){
 for(let c = 0; c < cols; c++){
 if(grid[r][c] < threshold){
-let fx = random(c * GRID_SIZE, (c+1)*GRID_SIZE);
-let fy = random(r * GRID_SIZE, (r+1)*GRID_SIZE);
-let type = (Math.random() < 0.05) ? 'super' : 'normal';
+let fx = random(c * GRID_SIZE, (c+1) * GRID_SIZE);
+let fy = random(r * GRID_SIZE, (r+1) * GRID_SIZE);
+let type = (Math.random() < 0.07) ? 'super' : 'normal';
 foods.push(new Food(fx, fy, type));
 }
 }
+}
+// 检查当前是否存在超级食物，若数量不超过3则强制补充
+const superFoodCount = foods.filter(f => f.type === 'super').length;
+if (superFoodCount <= 3) {
+    let fx = random(0,MAP_WIDTH);
+    let fy = random(0,MAP_HEIGHT);
+    foods.push(new Food(fx,fy,'super'));
 }
 let compCount = snakes.filter(s => !s.isPlayer && s.alive).length;
 if(compCount < 3){
@@ -452,14 +560,14 @@ controlPos.y = e.clientY;
 });
 }
 
-/***************** 电脑蛇 AI *****************/
+/***************** 电脑蛇 AI 行动逻辑 *****************/
 function updateComputerSnakeAI(snake) {
 if(!snake.alive) return;
 // 1. 避开附近炸弹球（圆形碰撞判定）
 for(let bomb of bombs){
 if(!bomb.alive) continue;
 let dBomb = Math.hypot(snake.head.x - bomb.x, snake.head.y - bomb.y);
-if(dBomb < (SNAKE_HEAD_RADIUS + bomb.radius)){
+if(dBomb < (SNAKE_HEAD_RADIUS + bomb.radius + 50)){ // 扩大了躲避范围
 let dx = snake.head.x - bomb.x;
 let dy = snake.head.y - bomb.y;
 let mag = Math.hypot(dx, dy);
@@ -470,13 +578,13 @@ return;
 }
 }
 }
-// 2. 主动攻击距离400以内的其他蛇
+// 2. 主动攻击距离300px以内的其他蛇
 let attackTarget = null;
 let attackDist = Infinity;
 for(let other of snakes){
 if(other === snake || !other.alive) continue;
 let d = Math.hypot(snake.head.x - other.head.x, snake.head.y - other.head.y);
-if(d < 400 && d < attackDist){
+if(d < 300 && d < attackDist){
 attackTarget = other.head;
 attackDist = d;
 }
@@ -513,7 +621,34 @@ snake.direction.y = dy / mag;
 }
 return;
 }
-// 4. 默认追踪玩家蛇
+// 4. 若没有超级食物，且离玩家较远（大于400px），则寻找尸体食物
+if(!target) {
+    let playerDist = Math.hypot(snake.head.x - playerSnake.head.x,snake.head.y - playerSnake.head.y);
+    if (playerDist > 400){
+        let corpseTarget = null;
+        let minCorpseDist = Infinity;
+        for (let f of foods) {
+            if (f.type === 'corpse') {
+                let d = Math.hypot(snake.head.x - f.x,snake.head.y - f.y);
+                if (d < minCorpseDist) {
+                    minCorpseDist = d;
+                    corpseTarget = {x:f.x,y:f.y};
+                }
+            }
+        }
+        if (corpseTarget) {
+            let dx = corpseTarget.x - snake.head.x;
+            let dy = corpseTarget.y - snake.head.y;
+            let mag = Math.hypot(dx,dy);
+            if (mag !== 0) {
+                snake.direction.x = dx / mag;
+                snake.direction.y = dy / mag;
+            }
+            return;
+        }
+    }
+}
+// 5. 其他情况下默认追踪玩家蛇
 let dx = playerSnake.head.x - snake.head.x;
 let dy = playerSnake.head.y - snake.head.y;
 let mag = Math.hypot(dx, dy);
@@ -588,13 +723,11 @@ break;
 }
 
 function spawnCorpseFoods(snake) {
-let count = snake.segments.length;
-let center = snake.segments[snake.segments.length - 1];
-for(let i = 0; i < count; i++){
-let fx = center.x + random(-30, 30);
-let fy = center.y + random(-30, 30);
-foods.push(new Food(fx, fy, 'corpse'));
-}
+snake.segments.forEach(seg => {
+    let fx = seg.x + random(-3,3);
+    let fy = seg.y + random(-3,3);
+    foods.push(new Food(fx, fy, 'corpse'));
+});
 snakes = snakes.filter(s => s !== snake);
 }
 
@@ -602,22 +735,26 @@ snakes = snakes.filter(s => s !== snake);
 function gameLoop() {
 ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-for(let bomb of bombs){
-bomb.update();
-}
+let now = Date.now();
+let dt = isPaused ? 0 : (now - lastUpdate);
+lastUpdate = now;
+gameTime += dt;
 
-for(let s of snakes){
-if(s.alive){
-if(!s.isPlayer){
-updateComputerSnakeAI(s);
+// 只有未暂停时才更新实体状态
+if (!isPaused){
+    bombs.forEach(bomb => bomb.update());
+    snakes.forEach(snake => {
+        if (!snake.isPlayer) updateComputerSnakeAI(snake);
+        snake.update();
+        checkFoodCollision(snake);
+        checkSnakeCollisions();
+    });
+    foods.forEach(food => food.update());
+    if(gameTime - lastRefreshTime >= FOOD_REFRESH_INTERVAL){
+        refreshFoodByDensity();
+        lastRefreshTime = gameTime;
+    }
 }
-s.update();
-checkFoodCollision(s);
-} else {
-s.update();
-}
-}
-checkSnakeCollisions();
 
 for(let i = foods.length - 1; i >= 0; i--){
 let food = foods[i];
